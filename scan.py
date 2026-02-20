@@ -369,9 +369,9 @@ def generate_test_snippet(crossing: FoundCrossing) -> str:
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 scan.py <directory> [--generate-tests]")
+        print("Usage: crossing-scan <directory> [--generate-tests]")
         print()
         print("Scans Python files for boundary crossings (encode/decode pairs)")
         print("and reports what it finds.")
@@ -396,3 +396,7 @@ if __name__ == "__main__":
             for c in report.paired_crossings:
                 print(generate_test_snippet(c))
                 print()
+
+
+if __name__ == "__main__":
+    main()
