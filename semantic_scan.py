@@ -975,22 +975,39 @@ def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_impli
                 report.parse_errors += 1
 
     # Build cross-file call edges from import resolution
+    # Collect new edges separately to avoid modifying list while iterating
+    cross_file_edges: list[CallEdge] = []
     for imp in all_imports:
-        if not imp.name:
-            continue
-        source_file = _resolve_module_to_file(imp.module, root)
-        if source_file and source_file in file_definitions:
-            if imp.name in file_definitions[source_file]:
-                # Find all call edges in the importing file that call this alias
+        if imp.name:
+            # `from X import Y` — resolve Y to a definition in X's file
+            source_file = _resolve_module_to_file(imp.module, root)
+            if source_file and source_file in file_definitions:
+                if imp.name in file_definitions[source_file]:
+                    for edge in all_call_edges:
+                        if edge.file == imp.file and edge.callee == imp.alias:
+                            cross_file_edges.append(CallEdge(
+                                caller=edge.caller,
+                                callee=imp.name,
+                                file=f"{imp.file}->{source_file}",
+                                line=edge.line,
+                            ))
+        else:
+            # `import X` — look for `X.func()` calls (dotted attribute access)
+            source_file = _resolve_module_to_file(imp.module, root)
+            if source_file and source_file in file_definitions:
+                prefix = imp.alias + "."
                 for edge in all_call_edges:
-                    if edge.file == imp.file and edge.callee == imp.alias:
-                        # Create a cross-file edge: caller in imp.file -> imp.name in source_file
-                        all_call_edges.append(CallEdge(
-                            caller=edge.caller,
-                            callee=imp.name,
-                            file=f"{imp.file}->{source_file}",
-                            line=edge.line,
-                        ))
+                    if (edge.file == imp.file
+                            and edge.callee.startswith(prefix)):
+                        func_name = edge.callee[len(prefix):]
+                        if func_name in file_definitions[source_file]:
+                            cross_file_edges.append(CallEdge(
+                                caller=edge.caller,
+                                callee=func_name,
+                                file=f"{imp.file}->{source_file}",
+                                line=edge.line,
+                            ))
+    all_call_edges.extend(cross_file_edges)
 
     call_graph = CallGraph(all_call_edges) if all_call_edges else None
     report.crossings = analyze_crossings(

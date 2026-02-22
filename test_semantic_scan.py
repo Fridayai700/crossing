@@ -1046,6 +1046,72 @@ def test_cross_file_aliased_import():
         assert len(val_crossings) >= 1
 
 
+def test_cross_file_plain_import_dotted_call():
+    """Plain `import X` + `X.func()` should create cross-file edges."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "validators.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                def check_name(name):
+                    if not name:
+                        raise ValueError("name required")
+
+                def check_age(age):
+                    if age < 0:
+                        raise ValueError("age negative")
+            """))
+
+        with open(os.path.join(d, "app.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                import validators
+
+                def process(data):
+                    try:
+                        validators.check_name(data["name"])
+                        validators.check_age(data["age"])
+                    except ValueError:
+                        return "invalid"
+            """))
+
+        report = scan_directory(d)
+        assert report.files_scanned == 2
+
+        val_crossings = [c for c in report.crossings if c.exception_type == "ValueError"]
+        assert len(val_crossings) == 1
+        c = val_crossings[0]
+        assert c.is_polymorphic  # two raise sites
+        assert len(c.raise_sites) == 2
+        # Raises from validators.py, handler from app.py
+        raise_files = {r.file for r in c.raise_sites}
+        handler_files = {h.file for h in c.handler_sites}
+        assert any("validators.py" in f for f in raise_files)
+        assert any("app.py" in f for f in handler_files)
+
+
+def test_cross_file_plain_import_aliased():
+    """Plain `import X as Y` + `Y.func()` should resolve cross-file edges."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "helpers.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                def parse(s):
+                    raise TypeError("cannot parse")
+            """))
+
+        with open(os.path.join(d, "main.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                import helpers as h
+
+                def run():
+                    try:
+                        h.parse("abc")
+                    except TypeError:
+                        pass
+            """))
+
+        report = scan_directory(d)
+        type_crossings = [c for c in report.crossings if c.exception_type == "TypeError"]
+        assert len(type_crossings) >= 1
+
+
 def test_cross_file_subpackage():
     """Imports from subpackages should resolve correctly."""
     with tempfile.TemporaryDirectory() as d:
