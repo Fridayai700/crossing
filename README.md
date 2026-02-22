@@ -10,16 +10,16 @@ Find where the same exception type carries different meanings depending on the c
 
 ```bash
 # Basic scan
-python3 semantic_scan.py /path/to/project
+crossing-semantic /path/to/project
 
 # With implicit raises (dict access, getattr, etc.)
-python3 semantic_scan.py --implicit /path/to/project
+crossing-semantic --implicit /path/to/project
 
 # JSON output for tooling
-python3 semantic_scan.py --format json /path/to/project
+crossing-semantic --format json /path/to/project
 
 # CI mode: fail if elevated/high risk crossings found
-python3 semantic_scan.py --ci --min-risk elevated /path/to/project
+crossing-semantic --ci --min-risk elevated /path/to/project
 ```
 
 Example: a `KeyError` that means "config key missing" and a `KeyError` that means "factor-filtered to empty" arrive at the same `except KeyError` handler. The handler assumes one meaning. The bug is silent.
@@ -68,7 +68,7 @@ This isn't fuzzing for crashes. It's fuzzing for **silent data loss** — the op
 ### CLI Options
 
 ```
-python3 semantic_scan.py [OPTIONS] PATH
+crossing-semantic [OPTIONS] PATH
 
 Options:
   --implicit          Detect implicit raises (dict access, getattr, etc.)
@@ -157,6 +157,48 @@ python3 scan.py /path/to/project
 ```
 
 Finds encode/decode pairs for: JSON, YAML, pickle, TOML, base64, URL encoding, CSV, struct, zlib, gzip.
+
+---
+
+## GitHub Action
+
+Add Crossing to your CI pipeline:
+
+```yaml
+# .github/workflows/crossing.yml
+name: Exception Analysis
+on: [pull_request]
+
+jobs:
+  crossing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Fridayai700/crossing@main
+        with:
+          path: 'src/'
+          fail-on-risk: 'elevated'
+```
+
+Inputs: `path`, `min-risk`, `format`, `implicit`, `exclude`, `fail-on-risk`.
+
+---
+
+## Benchmarks
+
+Scanned 7 popular Python projects (Feb 2026):
+
+| Project | Files | Crossings | High Risk |
+|---|---|---|---|
+| celery | 161 | 12 | 3 |
+| flask | 24 | 6 | 2 |
+| requests | 18 | 5 | 2 |
+| rich | 100 | 5 | 1 |
+| astroid | 96 | 5 | 0 |
+| httpx | 23 | 3 | 0 |
+| **fastapi** | **47** | **0** | **0** |
+
+FastAPI scoring clean validates the tool. Sample audit reports: [Flask](examples/audit-flask.md), [Requests](examples/audit-requests.md).
 
 ---
 
