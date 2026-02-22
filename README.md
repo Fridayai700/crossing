@@ -190,6 +190,7 @@ Scanned 7 popular Python projects (Feb 2026):
 
 | Project | Files | Crossings | High Risk |
 |---|---|---|---|
+| **django** | **902** | **80** | **6** |
 | celery | 161 | 12 | 3 |
 | flask | 24 | 6 | 2 |
 | requests | 18 | 5 | 2 |
@@ -198,7 +199,7 @@ Scanned 7 popular Python projects (Feb 2026):
 | httpx | 23 | 3 | 0 |
 | **fastapi** | **47** | **0** | **0** |
 
-FastAPI scoring clean validates the tool. Sample audit reports: [Celery](examples/audit-celery.md), [Flask](examples/audit-flask.md), [Requests](examples/audit-requests.md).
+FastAPI scoring clean validates the tool. Sample audit reports: [Django](examples/audit-django.md), [Celery](examples/audit-celery.md), [Flask](examples/audit-flask.md), [Requests](examples/audit-requests.md).
 
 ---
 
