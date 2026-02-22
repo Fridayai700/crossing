@@ -210,12 +210,9 @@ def test_yaml_tuple_becomes_list():
         pass  # expected — safe_load rejects python tags
 
 
-@pytest.mark.skipif(
-    __import__("sys").version_info < (3, 11),
-    reason="tomllib requires Python 3.11+"
-)
 def test_toml_crashes_on_none():
     """TOML can't represent None — should crash."""
+    pytest.importorskip("tomli_w")
     from crossing import toml_crossing
     c = toml_crossing()
     try:
