@@ -97,6 +97,24 @@ Semantic crossings:   12
 ============================================================
 ```
 
+### Information-Theoretic Scoring
+
+Each crossing reports quantitative metrics based on Shannon entropy:
+
+| Metric | What it measures |
+|--------|-----------------|
+| **Semantic entropy** | Bits of information carried by the exception type at raise sites (log2 of distinct origins) |
+| **Handler discrimination** | Bits preserved by handlers (re-raise = full, return/pass = zero) |
+| **Information loss** | Bits destroyed: entropy minus discrimination |
+| **Collapse ratio** | Normalized loss: 0% (no collapse) to 100% (total meaning erasure) |
+
+```
+--- AttributeError: 4 raise sites, 3 handlers — high risk ---
+  Information: 2.0 bits entropy, 0.3 bits lost, 83% collapse
+```
+
+In JSON output, each crossing includes an `information_theory` object, and the summary includes `total_information_loss_bits` and `mean_collapse_ratio` across all crossings.
+
 ### Real Bugs Found
 
 The semantic scanner has identified real bugs in production codebases:
