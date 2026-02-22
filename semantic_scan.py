@@ -100,6 +100,7 @@ class ExceptionRaise:
     context: str  # brief description of what's happening
     implicit: bool = False  # True if from dict/list access, not explicit raise
     try_scope_id: int | None = None  # ID of enclosing try block, if any
+    message_arg: str | None = None  # string literal argument to exception, if any
 
     def __str__(self):
         loc = f"{self.in_class}.{self.in_function}" if self.in_class else self.in_function
@@ -306,6 +307,7 @@ class SemanticVisitor(ast.NodeVisitor):
         exc_type = self._get_exception_type(node.exc)
         if exc_type:
             source = self._get_source(node.lineno)
+            message_arg = self._extract_message_arg(node.exc)
             self.raises.append(ExceptionRaise(
                 file=self.filename,
                 line=node.lineno,
@@ -315,6 +317,7 @@ class SemanticVisitor(ast.NodeVisitor):
                 source_line=source,
                 context=self._infer_context(node),
                 try_scope_id=self._current_try_scope,
+                message_arg=message_arg,
             ))
         self.generic_visit(node)
 
@@ -517,6 +520,18 @@ class SemanticVisitor(ast.NodeVisitor):
             return self.source_lines[lineno - 1].strip()
         return ""
 
+    def _extract_message_arg(self, exc_node: ast.expr) -> str | None:
+        """Extract string literal argument from exception constructor, if any.
+
+        For `raise ValueError("some message")`, returns "some message".
+        Returns None if the argument isn't a simple string literal.
+        """
+        if isinstance(exc_node, ast.Call) and exc_node.args:
+            first_arg = exc_node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                return first_arg.value
+        return None
+
     def _infer_context(self, node: ast.Raise) -> str:
         """Try to describe what's happening around this raise."""
         # Look at the enclosing if/for/try to understand context
@@ -690,6 +705,29 @@ def analyze_crossings(
                             f"{len(reachable_raises)} raise sites across "
                             f"{len(raise_funcs)} functions via call chain.]"
                         )
+
+        # Message-differentiation heuristic: if all explicit raise sites
+        # pass distinct string literals to the exception constructor, the
+        # crossing is likely intentional — the messages carry the semantic
+        # differentiation that the exception type alone cannot.
+        # Only applied when there are multiple handlers (suggesting the
+        # codebase actively catches this type in multiple places and may
+        # rely on message content). With a single handler, distinct messages
+        # don't prevent meaning collapse in the handler's code path.
+        explicit_raises = [r for r in raise_sites if not r.implicit]
+        if (len(explicit_raises) > 1 and len(handler_sites) > 1
+                and crossing.risk_level in ("medium", "high")):
+            messages = [r.message_arg for r in explicit_raises]
+            if all(m is not None for m in messages) and len(set(messages)) == len(messages):
+                # All raises have distinct string literal messages
+                if crossing.risk_level == "high":
+                    crossing.risk_level = "medium"
+                elif crossing.risk_level == "medium":
+                    crossing.risk_level = "low"
+                crossing.description += (
+                    f" [Downgraded: all {len(explicit_raises)} raise sites "
+                    f"pass distinct string messages — likely intentional differentiation.]"
+                )
 
         crossings.append(crossing)
 

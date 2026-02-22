@@ -589,3 +589,112 @@ def test_call_graph_stats():
     g = CallGraph(edges)
     assert g.node_count == 4  # a, b, c, d
     assert g.edge_count == 3
+
+
+def test_message_differentiation_downgrades_risk():
+    """When all raise sites pass distinct string messages and multiple handlers exist, risk is downgraded."""
+    code = textwrap.dedent("""\
+        class InvalidInput(Exception):
+            pass
+
+        def validate(value):
+            if not value:
+                raise InvalidInput("Value cannot be empty")
+            if len(value) > 100:
+                raise InvalidInput("Value too long")
+            if not value.isalpha():
+                raise InvalidInput("Value must be alphabetic")
+
+        def process():
+            try:
+                validate("test")
+            except InvalidInput as e:
+                print(e)
+
+        def other_process():
+            try:
+                validate("other")
+            except InvalidInput as e:
+                print(e)
+    """)
+    raises, handlers = _scan_code(code)
+    crossings = analyze_crossings(raises, handlers)
+    invalid_input = [c for c in crossings if c.exception_type == "InvalidInput"]
+    assert len(invalid_input) == 1
+    c = invalid_input[0]
+    # All 3 raises have distinct messages + 2 handlers, so risk should be downgraded
+    assert "Downgraded" in c.description
+
+
+def test_message_differentiation_not_applied_single_handler():
+    """With only one handler, distinct messages don't prevent meaning collapse."""
+    code = textwrap.dedent("""\
+        class InvalidInput(Exception):
+            pass
+
+        def validate(value):
+            if not value:
+                raise InvalidInput("Value cannot be empty")
+            if len(value) > 100:
+                raise InvalidInput("Value too long")
+            if not value.isalpha():
+                raise InvalidInput("Value must be alphabetic")
+
+        def process():
+            try:
+                validate("test")
+            except InvalidInput as e:
+                print(e)
+    """)
+    raises, handlers = _scan_code(code)
+    crossings = analyze_crossings(raises, handlers)
+    invalid_input = [c for c in crossings if c.exception_type == "InvalidInput"]
+    assert len(invalid_input) == 1
+    c = invalid_input[0]
+    # Single handler — distinct messages don't help, no downgrade
+    assert "Downgraded" not in c.description
+
+
+def test_message_differentiation_not_applied_without_messages():
+    """When raise sites don't have string literal messages, no downgrade."""
+    code = textwrap.dedent("""\
+        def process(data):
+            if not data.get("name"):
+                raise ValueError(f"Missing name in {data}")
+            if not data.get("age"):
+                raise ValueError(f"Missing age in {data}")
+
+        def run():
+            try:
+                process({})
+            except ValueError:
+                pass
+    """)
+    raises, handlers = _scan_code(code)
+    crossings = analyze_crossings(raises, handlers)
+    val_errors = [c for c in crossings if c.exception_type == "ValueError"]
+    assert len(val_errors) == 1
+    c = val_errors[0]
+    # f-strings are not string literals, so no downgrade
+    assert "Downgraded" not in c.description
+
+
+def test_message_arg_extraction():
+    """ExceptionRaise captures string literal argument from raise."""
+    code = textwrap.dedent("""\
+        raise ValueError("specific error message")
+    """)
+    raises, handlers = _scan_code(code)
+    assert len(raises) == 1
+    assert raises[0].message_arg == "specific error message"
+
+
+def test_message_arg_none_for_non_literal():
+    """ExceptionRaise.message_arg is None when arg isn't a string literal."""
+    code = textwrap.dedent("""\
+        msg = "error"
+        raise ValueError(msg)
+    """)
+    raises, handlers = _scan_code(code)
+    assert len(raises) == 1
+    assert raises[0].message_arg is None
