@@ -201,6 +201,112 @@ class SemanticScanReport:
     def risky_crossings(self) -> list[SemanticCrossing]:
         return [c for c in self.crossings if c.risk_level in ("medium", "high")]
 
+    def filter(self, min_risk: str = "low") -> "SemanticScanReport":
+        """Return a new report filtered by minimum risk level."""
+        risk_order = {"low": 0, "medium": 1, "elevated": 1, "high": 2}
+        threshold = risk_order.get(min_risk, 0)
+        filtered = [c for c in self.crossings
+                     if risk_order.get(c.risk_level, 0) >= threshold]
+        report = SemanticScanReport(root=self.root)
+        report.files_scanned = self.files_scanned
+        report.parse_errors = self.parse_errors
+        report.raises = self.raises
+        report.handlers = self.handlers
+        report.crossings = filtered
+        return report
+
+    def to_json(self) -> str:
+        """Serialize report to JSON."""
+        import json as json_mod
+        explicit = [r for r in self.raises if not r.implicit]
+        implicit = [r for r in self.raises if r.implicit]
+        data = {
+            "root": self.root,
+            "summary": {
+                "files_scanned": self.files_scanned,
+                "parse_errors": self.parse_errors,
+                "total_raises": len(self.raises),
+                "explicit_raises": len(explicit),
+                "implicit_raises": len(implicit),
+                "total_handlers": len(self.handlers),
+                "total_crossings": len(self.crossings),
+                "polymorphic_crossings": len(self.polymorphic_crossings),
+                "risky_crossings": len(self.risky_crossings),
+            },
+            "crossings": [
+                {
+                    "exception_type": c.exception_type,
+                    "risk_level": c.risk_level,
+                    "description": c.description,
+                    "is_polymorphic": c.is_polymorphic,
+                    "raise_sites": [
+                        {"file": r.file, "line": r.line,
+                         "exception_type": r.exception_type,
+                         "function": f"{r.in_class}.{r.in_function}" if r.in_class else r.in_function,
+                         "implicit": r.implicit,
+                         "context": r.context,
+                         "message": r.message_arg}
+                        for r in c.raise_sites
+                    ],
+                    "handler_sites": [
+                        {"file": h.file, "line": h.line,
+                         "exception_type": h.exception_type,
+                         "function": f"{h.in_class}.{h.in_function}" if h.in_class else h.in_function,
+                         "re_raises": h.re_raises,
+                         "returns_value": h.returns_value,
+                         "assigns_default": h.assigns_default,
+                         "direct_raises_in_scope": h.direct_raises_in_scope}
+                        for h in c.handler_sites
+                    ],
+                }
+                for c in self.crossings
+            ],
+        }
+        return json_mod.dumps(data, indent=2)
+
+    def to_markdown(self) -> str:
+        """Serialize report to markdown."""
+        explicit = [r for r in self.raises if not r.implicit]
+        implicit = [r for r in self.raises if r.implicit]
+        lines = [
+            f"# Crossing Scan: `{self.root}`\n",
+            f"| Metric | Count |",
+            f"|--------|-------|",
+            f"| Files scanned | {self.files_scanned} |",
+            f"| Parse errors | {self.parse_errors} |",
+            f"| Exception raises | {len(self.raises)} ({len(explicit)} explicit, {len(implicit)} implicit) |",
+            f"| Exception handlers | {len(self.handlers)} |",
+            f"| Semantic crossings | {len(self.crossings)} |",
+            f"| Polymorphic | {len(self.polymorphic_crossings)} |",
+            f"| Elevated/high risk | {len(self.risky_crossings)} |",
+            "",
+        ]
+        if self.risky_crossings:
+            lines.append("## Risky Crossings\n")
+            for crossing in self.risky_crossings:
+                lines.append(f"### {crossing.exception_type} ({crossing.risk_level} risk)\n")
+                lines.append(f"{crossing.description}\n")
+                lines.append("**Raise sites:**\n")
+                for r in crossing.raise_sites[:10]:
+                    lines.append(f"- `{r.file}:{r.line}` — {'implicit' if r.implicit else 'raise'} "
+                                 f"{r.exception_type} in {r.in_class + '.' if r.in_class else ''}{r.in_function}")
+                if len(crossing.raise_sites) > 10:
+                    lines.append(f"- ... and {len(crossing.raise_sites) - 10} more")
+                lines.append("\n**Handlers:**\n")
+                for h in crossing.handler_sites[:10]:
+                    action = "re-raises" if h.re_raises else ("returns" if h.returns_value else "handles")
+                    lines.append(f"- `{h.file}:{h.line}` — except {h.exception_type} "
+                                 f"in {h.in_class + '.' if h.in_class else ''}{h.in_function} ({action})")
+                if len(crossing.handler_sites) > 10:
+                    lines.append(f"- ... and {len(crossing.handler_sites) - 10} more")
+                lines.append("")
+        elif self.polymorphic_crossings:
+            lines.append("## Polymorphic Crossings (low risk)\n")
+            for crossing in self.polymorphic_crossings[:5]:
+                lines.append(f"- {crossing}")
+            lines.append("")
+        return "\n".join(lines)
+
     def print(self):
         print(f"\n{'='*60}")
         print(f"Semantic Crossing Scan: {self.root}")
@@ -1018,24 +1124,59 @@ def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_impli
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 semantic_scan.py [--implicit] /path/to/codebase")
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="crossing",
+        description="Detect semantic boundary crossings in Python codebases — "
+                    "where the same exception type carries different meanings.",
+    )
+    parser.add_argument("path", help="Directory to scan")
+    parser.add_argument("--implicit", action="store_true",
+                        help="Also detect implicit raises (dict access → KeyError, etc.)")
+    parser.add_argument("--format", choices=["text", "json", "markdown"],
+                        default="text", help="Output format (default: text)")
+    parser.add_argument("--min-risk", choices=["low", "medium", "elevated", "high"],
+                        default="low", help="Minimum risk level to report (default: low)")
+    parser.add_argument("--exclude", action="append", default=[],
+                        help="Glob patterns to exclude (can repeat)")
+    parser.add_argument("--ci", action="store_true",
+                        help="CI mode: exit code 1 if any elevated/high risk crossings found")
+
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.path):
+        print(f"Error: {args.path} is not a directory", file=sys.stderr)
+        sys.exit(2)
+
+    exclude_dirs = None
+    if args.exclude:
+        # Start with defaults and add user patterns
+        exclude_dirs = {
+            ".git", "__pycache__", ".venv", "venv", "node_modules",
+            ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
+            ".eggs",
+        }
+        exclude_dirs.update(args.exclude)
+
+    report = scan_directory(args.path, exclude_dirs=exclude_dirs,
+                            detect_implicit=args.implicit)
+
+    # Apply min-risk filter
+    if args.min_risk != "low":
+        report = report.filter(args.min_risk)
+
+    # Output
+    if args.format == "json":
+        print(report.to_json())
+    elif args.format == "markdown":
+        print(report.to_markdown())
+    else:
+        report.print()
+
+    # CI exit code
+    if args.ci and report.risky_crossings:
         sys.exit(1)
-
-    detect_implicit = "--implicit" in sys.argv
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-
-    if not args:
-        print("Usage: python3 semantic_scan.py [--implicit] /path/to/codebase")
-        sys.exit(1)
-
-    root = args[0]
-    if not os.path.isdir(root):
-        print(f"Error: {root} is not a directory")
-        sys.exit(1)
-
-    report = scan_directory(root, detect_implicit=detect_implicit)
-    report.print()
 
 
 if __name__ == "__main__":
