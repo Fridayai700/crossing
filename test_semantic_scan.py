@@ -9,6 +9,7 @@ from semantic_scan import (
     CallGraph,
     ExceptionRaise,
     ExceptionHandler,
+    ImportRecord,
     SemanticCrossing,
     SemanticVisitor,
     analyze_crossings,
@@ -23,7 +24,7 @@ def _scan_code(code: str):
         f.write(textwrap.dedent(code))
         f.flush()
         try:
-            raises, handlers, _call_edges, _exc_parents = scan_file(f.name)
+            raises, handlers, _call_edges, _exc_parents, _imports = scan_file(f.name)
             return raises, handlers
         finally:
             os.unlink(f.name)
@@ -35,7 +36,8 @@ def _scan_code_full(code: str):
         f.write(textwrap.dedent(code))
         f.flush()
         try:
-            return scan_file(f.name)
+            raises, handlers, call_edges, exc_parents, _imports = scan_file(f.name)
+            return raises, handlers, call_edges, exc_parents
         finally:
             os.unlink(f.name)
 
@@ -231,7 +233,7 @@ def _scan_code_implicit(code: str):
         f.write(textwrap.dedent(code))
         f.flush()
         try:
-            raises, handlers, _call_edges, _exc_parents = scan_file(f.name, detect_implicit=True)
+            raises, handlers, _call_edges, _exc_parents, _imports = scan_file(f.name, detect_implicit=True)
             return raises, handlers
         finally:
             os.unlink(f.name)
@@ -899,3 +901,176 @@ def test_inheritance_subclass_not_duplicated():
     assert "ParseError" not in exc_crossing_types
     val_errors = [c for c in crossings if c.exception_type == "ValueError"]
     assert len(val_errors) == 1
+
+
+# --- Cross-file import tracking tests (v0.7) ---
+
+
+def test_imports_tracked():
+    """scan_file should extract import records."""
+    code = textwrap.dedent("""\
+        from os.path import join
+        import sys
+        from collections import defaultdict as dd
+    """)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(code)
+        f.flush()
+        try:
+            _, _, _, _, imports = scan_file(f.name)
+        finally:
+            os.unlink(f.name)
+
+    assert len(imports) == 3
+    # from os.path import join
+    join_imp = [i for i in imports if i.name == "join"][0]
+    assert join_imp.module == "os.path"
+    assert join_imp.alias == "join"
+    # import sys
+    sys_imp = [i for i in imports if i.alias == "sys"][0]
+    assert sys_imp.module == "sys"
+    assert sys_imp.name == ""
+    # from collections import defaultdict as dd
+    dd_imp = [i for i in imports if i.alias == "dd"][0]
+    assert dd_imp.module == "collections"
+    assert dd_imp.name == "defaultdict"
+
+
+def test_cross_file_crossing_detection():
+    """Cross-file imports should connect call graphs across files."""
+    with tempfile.TemporaryDirectory() as d:
+        # Module with raises
+        with open(os.path.join(d, "validators.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                def validate_name(name):
+                    if not name:
+                        raise ValueError("name required")
+
+                def validate_age(age):
+                    if age < 0:
+                        raise ValueError("age negative")
+            """))
+
+        # Module that imports and catches
+        with open(os.path.join(d, "app.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                from validators import validate_name, validate_age
+
+                def process(data):
+                    try:
+                        validate_name(data["name"])
+                        validate_age(data["age"])
+                    except ValueError:
+                        return "invalid"
+            """))
+
+        report = scan_directory(d)
+        assert report.files_scanned == 2
+
+        # Should find the ValueError crossing with raises from validators.py
+        # and handler from app.py
+        val_crossings = [c for c in report.crossings if c.exception_type == "ValueError"]
+        assert len(val_crossings) == 1
+        c = val_crossings[0]
+        assert c.is_polymorphic  # two raise sites
+        assert len(c.raise_sites) == 2
+        assert len(c.handler_sites) == 1
+
+        # Cross-file: raises are from validators.py, handler from app.py
+        raise_files = {r.file for r in c.raise_sites}
+        handler_files = {h.file for h in c.handler_sites}
+        assert any("validators.py" in f for f in raise_files)
+        assert any("app.py" in f for f in handler_files)
+
+
+def test_cross_file_call_graph_annotation():
+    """Cross-file call graph should annotate reachability."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "errors.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                def check_a():
+                    raise KeyError("missing a")
+
+                def check_b():
+                    raise KeyError("missing b")
+
+                def check_c():
+                    raise KeyError("missing c")
+            """))
+
+        with open(os.path.join(d, "main.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                from errors import check_a, check_b, check_c
+
+                def run():
+                    try:
+                        check_a()
+                        check_b()
+                        check_c()
+                    except KeyError:
+                        print("missing key")
+            """))
+
+        report = scan_directory(d)
+        ke_crossings = [c for c in report.crossings if c.exception_type == "KeyError"]
+        assert len(ke_crossings) == 1
+        c = ke_crossings[0]
+        assert len(c.raise_sites) == 3
+        # Should have call graph annotation showing cross-file reachability
+        assert "Call graph" in c.description
+
+
+def test_cross_file_aliased_import():
+    """Aliased imports should still resolve cross-file edges."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "helpers.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                def parse_int(s):
+                    raise ValueError("not an int")
+            """))
+
+        with open(os.path.join(d, "consumer.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                from helpers import parse_int as pi
+
+                def run():
+                    try:
+                        pi("abc")
+                    except ValueError:
+                        pass
+            """))
+
+        report = scan_directory(d)
+        val_crossings = [c for c in report.crossings if c.exception_type == "ValueError"]
+        # Should find the crossing — aliased import resolved
+        assert len(val_crossings) >= 1
+
+
+def test_cross_file_subpackage():
+    """Imports from subpackages should resolve correctly."""
+    with tempfile.TemporaryDirectory() as d:
+        pkg = os.path.join(d, "mylib")
+        os.makedirs(pkg)
+        with open(os.path.join(pkg, "__init__.py"), "w") as f:
+            f.write("")
+        with open(os.path.join(pkg, "core.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                def load():
+                    raise IOError("file not found")
+            """))
+
+        with open(os.path.join(d, "app.py"), "w") as f:
+            f.write(textwrap.dedent("""\
+                from mylib.core import load
+
+                def main():
+                    try:
+                        load()
+                    except IOError:
+                        pass
+            """))
+
+        report = scan_directory(d)
+        io_crossings = [c for c in report.crossings if c.exception_type == "IOError"]
+        # Single raise site — should exist but low risk
+        assert len(io_crossings) >= 1

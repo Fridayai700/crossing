@@ -32,6 +32,16 @@ from typing import Optional
 
 
 @dataclass
+class ImportRecord:
+    """A tracked import statement."""
+    file: str           # file containing the import
+    line: int
+    module: str         # dotted module path (e.g., "os.path")
+    name: str           # imported name (e.g., "join") or "" for plain import
+    alias: str          # local alias, or same as name
+
+
+@dataclass
 class CallEdge:
     """A function call edge in the call graph."""
     caller: str  # fully qualified name (class.func or func)
@@ -236,6 +246,7 @@ class SemanticVisitor(ast.NodeVisitor):
         self.raises: list[ExceptionRaise] = []
         self.handlers: list[ExceptionHandler] = []
         self.call_edges: list[CallEdge] = []
+        self.imports: list[ImportRecord] = []
         self.exception_parents: dict[str, str] = {}  # child -> parent exception class
         self._scope_stack: list[tuple[str, str]] = []  # (class_name, func_name)
         self._detect_implicit = detect_implicit
@@ -282,6 +293,31 @@ class SemanticVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Attribute):
             return node.attr
         return ""
+
+    def visit_Import(self, node: ast.Import):
+        """Track `import X` statements."""
+        for alias in node.names:
+            self.imports.append(ImportRecord(
+                file=self.filename,
+                line=node.lineno,
+                module=alias.name,
+                name="",
+                alias=alias.asname or alias.name,
+            ))
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        """Track `from X import Y` statements."""
+        module = node.module or ""
+        for alias in node.names:
+            self.imports.append(ImportRecord(
+                file=self.filename,
+                line=node.lineno,
+                module=module,
+                name=alias.name,
+                alias=alias.asname or alias.name,
+            ))
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self._scope_stack.append(("", node.name))
@@ -594,8 +630,8 @@ class SemanticVisitor(ast.NodeVisitor):
         return "complex handler"
 
 
-def scan_file(filepath: str, detect_implicit: bool = False) -> tuple[list[ExceptionRaise], list[ExceptionHandler], list[CallEdge], dict[str, str]]:
-    """Scan a single file for exception raise/handle patterns, call edges, and exception hierarchy."""
+def scan_file(filepath: str, detect_implicit: bool = False) -> tuple[list[ExceptionRaise], list[ExceptionHandler], list[CallEdge], dict[str, str], list[ImportRecord]]:
+    """Scan a single file for exception raise/handle patterns, call edges, exception hierarchy, and imports."""
     try:
         with open(filepath) as f:
             source = f.read()
@@ -603,11 +639,11 @@ def scan_file(filepath: str, detect_implicit: bool = False) -> tuple[list[Except
         tree = ast.parse(source, filename=filepath)
         visitor = SemanticVisitor(filepath, source_lines, detect_implicit=detect_implicit)
         visitor.visit(tree)
-        return visitor.raises, visitor.handlers, visitor.call_edges, visitor.exception_parents
+        return visitor.raises, visitor.handlers, visitor.call_edges, visitor.exception_parents, visitor.imports
     except SyntaxError:
-        return [], [], [], {}
+        return [], [], [], {}, []
     except Exception:
-        return [], [], [], {}
+        return [], [], [], {}, []
 
 
 def _build_ancestor_map(exception_parents: dict[str, str]) -> dict[str, set[str]]:
@@ -854,8 +890,35 @@ def analyze_crossings(
     return crossings
 
 
+def _resolve_module_to_file(module: str, root: str) -> str | None:
+    """Try to resolve a dotted module path to a file path within root.
+
+    Handles:
+      - "package.module" -> root/package/module.py
+      - "package" -> root/package/__init__.py
+      - relative modules within the project
+    """
+    parts = module.split(".")
+    # Try as a module file first
+    candidate = os.path.join(root, *parts) + ".py"
+    if os.path.isfile(candidate):
+        return candidate
+    # Try as a package (__init__.py)
+    candidate = os.path.join(root, *parts, "__init__.py")
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
+
 def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_implicit: bool = False) -> SemanticScanReport:
-    """Scan a directory tree for semantic crossings."""
+    """Scan a directory tree for semantic crossings.
+
+    Cross-file analysis: resolves `from X import Y` to connect call graphs
+    across file boundaries. When file A imports function f from file B,
+    and A calls f inside a try block, the raises in B's f are connected
+    to A's handler through the cross-file call graph.
+    """
     if exclude_dirs is None:
         exclude_dirs = {
             ".git", "__pycache__", ".venv", "venv", "node_modules",
@@ -866,6 +929,11 @@ def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_impli
     report = SemanticScanReport(root=root)
     all_call_edges: list[CallEdge] = []
     all_exception_parents: dict[str, str] = {}
+    all_imports: list[ImportRecord] = []
+    # Track which top-level names each file defines (functions, classes)
+    file_definitions: dict[str, set[str]] = {}
+    # Track per-file raises keyed by function name for cross-file linking
+    file_raises: dict[str, dict[str, list[ExceptionRaise]]] = {}
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in exclude_dirs
@@ -879,13 +947,50 @@ def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_impli
             report.files_scanned += 1
 
             try:
-                raises, handlers, call_edges, exc_parents = scan_file(filepath, detect_implicit=detect_implicit)
+                raises, handlers, call_edges, exc_parents, imports = scan_file(filepath, detect_implicit=detect_implicit)
                 report.raises.extend(raises)
                 report.handlers.extend(handlers)
                 all_call_edges.extend(call_edges)
                 all_exception_parents.update(exc_parents)
+                all_imports.extend(imports)
+
+                # Extract top-level definitions from this file
+                defs: set[str] = set()
+                func_raises: dict[str, list[ExceptionRaise]] = {}
+                for r in raises:
+                    if r.file == filepath:
+                        defs.add(r.in_function)
+                        func_raises.setdefault(r.in_function, []).append(r)
+                for h in handlers:
+                    if h.file == filepath:
+                        defs.add(h.in_function)
+                for edge in call_edges:
+                    if edge.file == filepath:
+                        # caller name without class prefix for matching
+                        name = edge.caller.split(".")[-1] if "." in edge.caller else edge.caller
+                        defs.add(name)
+                file_definitions[filepath] = defs
+                file_raises[filepath] = func_raises
             except Exception:
                 report.parse_errors += 1
+
+    # Build cross-file call edges from import resolution
+    for imp in all_imports:
+        if not imp.name:
+            continue
+        source_file = _resolve_module_to_file(imp.module, root)
+        if source_file and source_file in file_definitions:
+            if imp.name in file_definitions[source_file]:
+                # Find all call edges in the importing file that call this alias
+                for edge in all_call_edges:
+                    if edge.file == imp.file and edge.callee == imp.alias:
+                        # Create a cross-file edge: caller in imp.file -> imp.name in source_file
+                        all_call_edges.append(CallEdge(
+                            caller=edge.caller,
+                            callee=imp.name,
+                            file=f"{imp.file}->{source_file}",
+                            line=edge.line,
+                        ))
 
     call_graph = CallGraph(all_call_edges) if all_call_edges else None
     report.crossings = analyze_crossings(
