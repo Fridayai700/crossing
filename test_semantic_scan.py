@@ -23,14 +23,14 @@ def _scan_code(code: str):
         f.write(textwrap.dedent(code))
         f.flush()
         try:
-            raises, handlers, _call_edges = scan_file(f.name)
+            raises, handlers, _call_edges, _exc_parents = scan_file(f.name)
             return raises, handlers
         finally:
             os.unlink(f.name)
 
 
 def _scan_code_full(code: str):
-    """Helper: write code to temp file, scan, return (raises, handlers, call_edges)."""
+    """Helper: write code to temp file, scan, return (raises, handlers, call_edges, exc_parents)."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(textwrap.dedent(code))
         f.flush()
@@ -231,7 +231,7 @@ def _scan_code_implicit(code: str):
         f.write(textwrap.dedent(code))
         f.flush()
         try:
-            raises, handlers, _call_edges = scan_file(f.name, detect_implicit=True)
+            raises, handlers, _call_edges, _exc_parents = scan_file(f.name, detect_implicit=True)
             return raises, handlers
         finally:
             os.unlink(f.name)
@@ -539,7 +539,7 @@ def test_call_graph_cycle_handling():
 
 def test_call_edges_extracted():
     """scan_file should extract call edges from function bodies."""
-    raises, handlers, call_edges = _scan_code_full("""
+    raises, handlers, call_edges, _exc_parents = _scan_code_full("""
         def helper():
             raise ValueError("oops")
 
@@ -557,7 +557,7 @@ def test_call_edges_extracted():
 
 def test_call_graph_cross_function_raise():
     """Call graph should connect raises in called functions to handlers."""
-    raises, handlers, call_edges = _scan_code_full("""
+    raises, handlers, call_edges, _exc_parents = _scan_code_full("""
         def raiser_a():
             raise KeyError("a")
 
@@ -735,3 +735,167 @@ def test_context_default_when_no_control_flow():
     """)
     assert len(raises) == 1
     assert raises[0].context == "in boom"
+
+
+# --- Inheritance-aware exception tracking tests ---
+
+
+def test_exception_parents_detected():
+    """scan_file should detect exception class inheritance."""
+    _, _, _, exc_parents = _scan_code_full("""
+        class CustomError(ValueError):
+            pass
+
+        class SpecificError(CustomError):
+            pass
+
+        def f():
+            raise CustomError("a")
+    """)
+    assert exc_parents["CustomError"] == "ValueError"
+    assert exc_parents["SpecificError"] == "CustomError"
+
+
+def test_exception_parents_non_exception_ignored():
+    """Classes not inheriting from exception-like names should be ignored."""
+    _, _, _, exc_parents = _scan_code_full("""
+        class MyClass(object):
+            pass
+
+        class Widget(BaseWidget):
+            pass
+
+        class AppError(RuntimeError):
+            pass
+    """)
+    assert "MyClass" not in exc_parents
+    assert "Widget" not in exc_parents
+    assert exc_parents["AppError"] == "RuntimeError"
+
+
+def test_inheritance_crossing_base_catches_subclass():
+    """Handler for ValueError should create crossing when subclass is raised."""
+    raises, handlers, _, exc_parents = _scan_code_full("""
+        class ValidationError(ValueError):
+            pass
+
+        def validate_name(name):
+            if not name:
+                raise ValidationError("name required")
+
+        def validate_age(age):
+            if age < 0:
+                raise ValueError("age negative")
+
+        def process():
+            try:
+                validate_name("x")
+                validate_age(1)
+            except ValueError:
+                pass
+    """)
+    crossings = analyze_crossings(raises, handlers, exception_parents=exc_parents)
+    val_errors = [c for c in crossings if c.exception_type == "ValueError"]
+    assert len(val_errors) == 1
+    c = val_errors[0]
+    # Should include both ValueError and ValidationError raise sites
+    assert len(c.raise_sites) == 2
+    exc_types = {r.exception_type for r in c.raise_sites}
+    assert exc_types == {"ValueError", "ValidationError"}
+
+
+def test_no_inheritance_crossing_without_relationship():
+    """Unrelated exception types should not be merged."""
+    raises, handlers = _scan_code("""
+        class FooError(Exception):
+            pass
+
+        class BarError(Exception):
+            pass
+
+        def a():
+            raise FooError("x")
+
+        def b():
+            raise BarError("y")
+
+        def c():
+            try:
+                a()
+            except FooError:
+                pass
+            try:
+                b()
+            except BarError:
+                pass
+    """)
+    crossings = analyze_crossings(raises, handlers)
+    # Neither should be polymorphic — each has only one raise
+    for c in crossings:
+        assert len(c.raise_sites) == 1
+
+
+def test_inheritance_multi_level_chain():
+    """Multi-level inheritance: handler for base catches all descendants."""
+    raises, handlers, _, exc_parents = _scan_code_full("""
+        class AppError(RuntimeError):
+            pass
+
+        class DBError(AppError):
+            pass
+
+        class ConnectionError(DBError):
+            pass
+
+        def connect():
+            raise ConnectionError("timeout")
+
+        def query():
+            raise DBError("syntax")
+
+        def generic():
+            raise AppError("unknown")
+
+        def run():
+            try:
+                connect()
+                query()
+                generic()
+            except AppError:
+                pass
+    """)
+    crossings = analyze_crossings(raises, handlers, exception_parents=exc_parents)
+    app_errors = [c for c in crossings if c.exception_type == "AppError"]
+    assert len(app_errors) == 1
+    c = app_errors[0]
+    # Should include all three: AppError, DBError, ConnectionError
+    assert len(c.raise_sites) == 3
+    exc_types = {r.exception_type for r in c.raise_sites}
+    assert exc_types == {"AppError", "DBError", "ConnectionError"}
+
+
+def test_inheritance_subclass_not_duplicated():
+    """Subclass raises should not create a separate crossing after being merged."""
+    raises, handlers, _, exc_parents = _scan_code_full("""
+        class ParseError(ValueError):
+            pass
+
+        def parse_int(s):
+            raise ParseError("not an int")
+
+        def parse_float(s):
+            raise ValueError("not a float")
+
+        def run():
+            try:
+                parse_int("x")
+                parse_float("y")
+            except ValueError:
+                pass
+    """)
+    crossings = analyze_crossings(raises, handlers, exception_parents=exc_parents)
+    # ParseError should be folded into ValueError crossing, not appear separately
+    exc_crossing_types = [c.exception_type for c in crossings]
+    assert "ParseError" not in exc_crossing_types
+    val_errors = [c for c in crossings if c.exception_type == "ValueError"]
+    assert len(val_errors) == 1

@@ -236,6 +236,7 @@ class SemanticVisitor(ast.NodeVisitor):
         self.raises: list[ExceptionRaise] = []
         self.handlers: list[ExceptionHandler] = []
         self.call_edges: list[CallEdge] = []
+        self.exception_parents: dict[str, str] = {}  # child -> parent exception class
         self._scope_stack: list[tuple[str, str]] = []  # (class_name, func_name)
         self._detect_implicit = detect_implicit
         self._try_scope_counter = 0
@@ -256,9 +257,31 @@ class SemanticVisitor(ast.NodeVisitor):
         return "<module>"
 
     def visit_ClassDef(self, node: ast.ClassDef):
+        # Record exception inheritance: class CustomError(ValueError) -> parent=ValueError
+        for base in node.bases:
+            base_name = self._get_name(base)
+            if base_name and self._looks_like_exception(base_name):
+                self.exception_parents[node.name] = base_name
+                break  # only record first exception parent
         self._scope_stack.append((node.name, ""))
         self.generic_visit(node)
         self._scope_stack.pop()
+
+    @staticmethod
+    def _looks_like_exception(name: str) -> bool:
+        """Heuristic: does this class name look like an exception?"""
+        return (name.endswith("Error") or name.endswith("Exception")
+                or name.endswith("Warning") or name == "BaseException"
+                or name == "Exception")
+
+    @staticmethod
+    def _get_name(node: ast.expr) -> str:
+        """Get simple name from an AST expression."""
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return ""
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self._scope_stack.append(("", node.name))
@@ -571,8 +594,8 @@ class SemanticVisitor(ast.NodeVisitor):
         return "complex handler"
 
 
-def scan_file(filepath: str, detect_implicit: bool = False) -> tuple[list[ExceptionRaise], list[ExceptionHandler], list[CallEdge]]:
-    """Scan a single file for exception raise/handle patterns and call edges."""
+def scan_file(filepath: str, detect_implicit: bool = False) -> tuple[list[ExceptionRaise], list[ExceptionHandler], list[CallEdge], dict[str, str]]:
+    """Scan a single file for exception raise/handle patterns, call edges, and exception hierarchy."""
     try:
         with open(filepath) as f:
             source = f.read()
@@ -580,17 +603,51 @@ def scan_file(filepath: str, detect_implicit: bool = False) -> tuple[list[Except
         tree = ast.parse(source, filename=filepath)
         visitor = SemanticVisitor(filepath, source_lines, detect_implicit=detect_implicit)
         visitor.visit(tree)
-        return visitor.raises, visitor.handlers, visitor.call_edges
+        return visitor.raises, visitor.handlers, visitor.call_edges, visitor.exception_parents
     except SyntaxError:
-        return [], [], []
+        return [], [], [], {}
     except Exception:
-        return [], [], []
+        return [], [], [], {}
+
+
+def _build_ancestor_map(exception_parents: dict[str, str]) -> dict[str, set[str]]:
+    """Build a map from each exception type to all its ancestors.
+
+    If CustomError -> ValueError -> Exception, then
+    ancestors["CustomError"] = {"ValueError", "Exception"}.
+    """
+    ancestors: dict[str, set[str]] = {}
+    for child in exception_parents:
+        chain: set[str] = set()
+        current = child
+        while current in exception_parents:
+            parent = exception_parents[current]
+            if parent in chain:
+                break  # cycle guard
+            chain.add(parent)
+            current = parent
+        ancestors[child] = chain
+    return ancestors
+
+
+def _build_descendant_map(exception_parents: dict[str, str]) -> dict[str, set[str]]:
+    """Build a map from each exception type to all its descendants."""
+    descendants: dict[str, set[str]] = {}
+    for child, parent in exception_parents.items():
+        current = parent
+        visited: set[str] = set()
+        while current and current not in visited:
+            descendants.setdefault(current, set()).add(child)
+            visited.add(current)
+            current = exception_parents.get(current)
+    return descendants
 
 
 def analyze_crossings(
     raises: list[ExceptionRaise],
     handlers: list[ExceptionHandler],
     call_graph: CallGraph | None = None,
+    exception_parents: dict[str, str] | None = None,
 ) -> list[SemanticCrossing]:
     """Analyze raises and handlers to find semantic crossings.
 
@@ -601,8 +658,16 @@ def analyze_crossings(
 
     If a call_graph is provided, uses reachability analysis to determine
     whether a raise site can actually reach a handler through the call chain.
+
+    If exception_parents is provided, detects inheritance crossings where
+    a handler for a base class catches subclass exceptions with different
+    semantics.
     """
-    # Group raises by exception type
+    # Build inheritance maps
+    descendants = _build_descendant_map(exception_parents) if exception_parents else {}
+    ancestors = _build_ancestor_map(exception_parents) if exception_parents else {}
+
+    # Group raises by exception type, including inheritance
     raise_groups: dict[str, list[ExceptionRaise]] = {}
     for r in raises:
         raise_groups.setdefault(r.exception_type, []).append(r)
@@ -613,14 +678,54 @@ def analyze_crossings(
         handler_groups.setdefault(h.exception_type, []).append(h)
 
     crossings = []
+    # Pre-compute which types will be absorbed by an ancestor's crossing:
+    # if a type has an ancestor that has handlers, skip it (it will be
+    # merged into the ancestor's crossing).
+    absorbed_types: set[str] = set()
+    for exc_type in raise_groups:
+        for ancestor in ancestors.get(exc_type, set()):
+            if ancestor in handler_groups or ancestor in raise_groups:
+                absorbed_types.add(exc_type)
+                break
+
+    # Track which exception types we've already processed to avoid duplicates
+    processed_types: set[str] = set()
+
     for exc_type, raise_sites in raise_groups.items():
+        if exc_type in processed_types or exc_type in absorbed_types:
+            continue
+        processed_types.add(exc_type)
+
         handler_sites = handler_groups.get(exc_type, [])
+
+        # Inheritance-aware: if this type has descendants, include their
+        # raise sites too (because a handler for this type catches them).
+        # Also include handlers from ancestor types that would catch this type.
+        inherited_raise_sites = list(raise_sites)
+        if descendants.get(exc_type):
+            for desc_type in descendants[exc_type]:
+                if desc_type in raise_groups:
+                    inherited_raise_sites.extend(raise_groups[desc_type])
+                    processed_types.add(desc_type)
+
+        # Use the expanded raise sites for analysis
+        has_inheritance = len(inherited_raise_sites) > len(raise_sites)
+        if has_inheritance:
+            raise_sites = inherited_raise_sites
 
         crossing = SemanticCrossing(
             exception_type=exc_type,
             raise_sites=raise_sites,
             handler_sites=handler_sites,
         )
+
+        # Add inheritance annotation if descendants contributed raise sites
+        if has_inheritance:
+            child_types = set(r.exception_type for r in raise_sites) - {exc_type}
+            crossing.description = (
+                f"Handler for {exc_type} also catches subclass(es): "
+                f"{', '.join(sorted(child_types))}. "
+            )
 
         # Classify raise sites
         explicit = [r for r in raise_sites if not r.implicit]
@@ -760,6 +865,7 @@ def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_impli
 
     report = SemanticScanReport(root=root)
     all_call_edges: list[CallEdge] = []
+    all_exception_parents: dict[str, str] = {}
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in exclude_dirs
@@ -773,15 +879,19 @@ def scan_directory(root: str, exclude_dirs: set[str] | None = None, detect_impli
             report.files_scanned += 1
 
             try:
-                raises, handlers, call_edges = scan_file(filepath, detect_implicit=detect_implicit)
+                raises, handlers, call_edges, exc_parents = scan_file(filepath, detect_implicit=detect_implicit)
                 report.raises.extend(raises)
                 report.handlers.extend(handlers)
                 all_call_edges.extend(call_edges)
+                all_exception_parents.update(exc_parents)
             except Exception:
                 report.parse_errors += 1
 
     call_graph = CallGraph(all_call_edges) if all_call_edges else None
-    report.crossings = analyze_crossings(report.raises, report.handlers, call_graph)
+    report.crossings = analyze_crossings(
+        report.raises, report.handlers, call_graph,
+        exception_parents=all_exception_parents or None,
+    )
     return report
 
 
