@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import ast
+import math
 import os
 import sys
 from dataclasses import dataclass, field
@@ -176,6 +177,83 @@ class SemanticCrossing:
                 actions.add("other")
         return len(actions) == 1
 
+    @property
+    def semantic_entropy(self) -> float:
+        """Shannon entropy of the raise-site distribution (bits).
+
+        Measures how much semantic information the exception type carries
+        at the point of raising. Each unique (function, context) pair is
+        a distinct micro-state. Uniform distribution assumed (worst case).
+
+        H = log2(N) where N = number of distinct semantic origins.
+        Returns 0.0 for single-origin exceptions.
+        """
+        if len(self.raise_sites) <= 1:
+            return 0.0
+        # Count distinct semantic origins: (class.function) pairs
+        origins = set()
+        for r in self.raise_sites:
+            loc = f"{r.in_class}.{r.in_function}" if r.in_class else r.in_function
+            origins.add(loc)
+        n = len(origins)
+        return math.log2(n) if n > 1 else 0.0
+
+    @property
+    def handler_discrimination(self) -> float:
+        """How much semantic information handlers preserve (bits).
+
+        A handler that re-raises preserves all information (passes the
+        exception with its full context to the next handler). A handler
+        that returns a default or silently passes destroys all information.
+        A handler that branches preserves some.
+
+        No handlers means the exception propagates uncaught — full
+        preservation (discrimination = semantic_entropy).
+
+        Computed as: fraction of handlers that re-raise × semantic_entropy.
+        This is a lower bound — actual discrimination from isinstance checks
+        or message inspection would add capacity, but we can't detect that
+        statically without deeper analysis.
+        """
+        if self.semantic_entropy == 0.0:
+            return 0.0
+        if not self.handler_sites:
+            # No handler = exception propagates with full semantics
+            return self.semantic_entropy
+        # Score each handler's discrimination capacity
+        total_capacity = 0.0
+        for h in self.handler_sites:
+            if h.re_raises:
+                total_capacity += 1.0  # Full preservation
+            elif h.direct_raises_in_scope > 0:
+                # Handler is near the raise — likely knows the context
+                total_capacity += 0.5
+            else:
+                total_capacity += 0.0  # Default/return/pass = total collapse
+        avg_capacity = total_capacity / len(self.handler_sites)
+        return avg_capacity * self.semantic_entropy
+
+    @property
+    def information_loss(self) -> float:
+        """Bits of semantic information destroyed at this crossing.
+
+        ΔH = H_raise - H_handle. Higher values mean more meaning is lost
+        when exceptions flow from raise sites through handlers.
+        """
+        return self.semantic_entropy - self.handler_discrimination
+
+    @property
+    def collapse_ratio(self) -> float:
+        """Normalized information loss: 0.0 (no collapse) to 1.0 (total).
+
+        The fraction of semantic information destroyed by the handler.
+        A collapse_ratio of 1.0 means the handler erases all distinction
+        between the different raise sites — the canonical "crossing."
+        """
+        if self.semantic_entropy == 0.0:
+            return 0.0
+        return self.information_loss / self.semantic_entropy
+
     def __str__(self):
         return (
             f"{self.exception_type}: {len(self.raise_sites)} raise sites, "
@@ -200,6 +278,19 @@ class SemanticScanReport:
     @property
     def risky_crossings(self) -> list[SemanticCrossing]:
         return [c for c in self.crossings if c.risk_level in ("medium", "high")]
+
+    @property
+    def total_information_loss(self) -> float:
+        """Total bits of semantic information lost across all crossings."""
+        return sum(c.information_loss for c in self.crossings)
+
+    @property
+    def mean_collapse_ratio(self) -> float:
+        """Average collapse ratio across crossings with non-zero entropy."""
+        relevant = [c for c in self.crossings if c.semantic_entropy > 0]
+        if not relevant:
+            return 0.0
+        return sum(c.collapse_ratio for c in relevant) / len(relevant)
 
     def filter(self, min_risk: str = "low") -> "SemanticScanReport":
         """Return a new report filtered by minimum risk level."""
@@ -232,6 +323,8 @@ class SemanticScanReport:
                 "total_crossings": len(self.crossings),
                 "polymorphic_crossings": len(self.polymorphic_crossings),
                 "risky_crossings": len(self.risky_crossings),
+                "total_information_loss_bits": round(self.total_information_loss, 2),
+                "mean_collapse_ratio": round(self.mean_collapse_ratio, 2),
             },
             "crossings": [
                 {
@@ -258,6 +351,12 @@ class SemanticScanReport:
                          "direct_raises_in_scope": h.direct_raises_in_scope}
                         for h in c.handler_sites
                     ],
+                    "information_theory": {
+                        "semantic_entropy_bits": round(c.semantic_entropy, 2),
+                        "handler_discrimination_bits": round(c.handler_discrimination, 2),
+                        "information_loss_bits": round(c.information_loss, 2),
+                        "collapse_ratio": round(c.collapse_ratio, 2),
+                    },
                 }
                 for c in self.crossings
             ],
@@ -299,6 +398,10 @@ class SemanticScanReport:
                                  f"in {h.in_class + '.' if h.in_class else ''}{h.in_function} ({action})")
                 if len(crossing.handler_sites) > 10:
                     lines.append(f"- ... and {len(crossing.handler_sites) - 10} more")
+                if crossing.semantic_entropy > 0:
+                    lines.append(f"\n**Information theory:** {crossing.semantic_entropy:.1f} bits entropy, "
+                                 f"{crossing.information_loss:.1f} bits lost, "
+                                 f"{crossing.collapse_ratio:.0%} collapse")
                 lines.append("")
         elif self.polymorphic_crossings:
             lines.append("## Polymorphic Crossings (low risk)\n")
@@ -320,10 +423,17 @@ class SemanticScanReport:
         print(f"Semantic crossings:   {len(self.crossings)}")
         print(f"  Polymorphic (multi-raise):  {len(self.polymorphic_crossings)}")
         print(f"  Elevated risk:              {len(self.risky_crossings)}")
+        if self.total_information_loss > 0:
+            print(f"  Total info loss:            {self.total_information_loss:.1f} bits")
+            print(f"  Mean collapse ratio:        {self.mean_collapse_ratio:.0%}")
 
         for crossing in self.risky_crossings:
             print(f"\n--- {crossing} ---")
             print(f"  {crossing.description}")
+            if crossing.semantic_entropy > 0:
+                print(f"  Information: {crossing.semantic_entropy:.1f} bits entropy, "
+                      f"{crossing.information_loss:.1f} bits lost, "
+                      f"{crossing.collapse_ratio:.0%} collapse")
             print(f"  Raise sites:")
             for r in crossing.raise_sites[:5]:
                 print(f"    {r}")

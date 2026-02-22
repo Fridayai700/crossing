@@ -4,6 +4,8 @@ import os
 import tempfile
 import textwrap
 
+import pytest
+
 from semantic_scan import (
     CallEdge,
     CallGraph,
@@ -1140,3 +1142,223 @@ def test_cross_file_subpackage():
         io_crossings = [c for c in report.crossings if c.exception_type == "IOError"]
         # Single raise site — should exist but low risk
         assert len(io_crossings) >= 1
+
+
+# === Information Theory Tests ===
+
+
+def test_semantic_entropy_single_origin():
+    """Single raise site has zero entropy."""
+    crossing = SemanticCrossing(
+        exception_type="ValueError",
+        raise_sites=[ExceptionRaise(
+            file="a.py", line=1, exception_type="ValueError",
+            in_function="parse", in_class="", source_line="raise ValueError",
+            context="in parse",
+        )],
+        handler_sites=[],
+    )
+    assert crossing.semantic_entropy == 0.0
+    assert crossing.collapse_ratio == 0.0
+    assert crossing.information_loss == 0.0
+
+
+def test_semantic_entropy_two_origins():
+    """Two raise sites in different functions = 1 bit of entropy."""
+    import math
+    crossing = SemanticCrossing(
+        exception_type="KeyError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="KeyError",
+                           in_function="lookup", in_class="", source_line="",
+                           context=""),
+            ExceptionRaise(file="a.py", line=10, exception_type="KeyError",
+                           in_function="fetch", in_class="", source_line="",
+                           context=""),
+        ],
+        handler_sites=[],
+    )
+    assert crossing.semantic_entropy == pytest.approx(1.0)
+
+
+def test_semantic_entropy_four_origins():
+    """Four distinct origins = 2 bits."""
+    crossing = SemanticCrossing(
+        exception_type="ValueError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=i, exception_type="ValueError",
+                           in_function=f"func{i}", in_class="", source_line="",
+                           context="")
+            for i in range(4)
+        ],
+        handler_sites=[],
+    )
+    assert crossing.semantic_entropy == pytest.approx(2.0)
+
+
+def test_semantic_entropy_same_function_collapses():
+    """Multiple raises in the SAME function count as one origin."""
+    crossing = SemanticCrossing(
+        exception_type="ValueError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="ValueError",
+                           in_function="parse", in_class="", source_line="",
+                           context=""),
+            ExceptionRaise(file="a.py", line=5, exception_type="ValueError",
+                           in_function="parse", in_class="", source_line="",
+                           context=""),
+        ],
+        handler_sites=[],
+    )
+    # Both in same function — one origin
+    assert crossing.semantic_entropy == 0.0
+
+
+def test_collapse_ratio_total_collapse():
+    """Handler that returns default = total collapse (ratio 1.0)."""
+    crossing = SemanticCrossing(
+        exception_type="KeyError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="KeyError",
+                           in_function="lookup", in_class="", source_line="",
+                           context=""),
+            ExceptionRaise(file="a.py", line=10, exception_type="KeyError",
+                           in_function="fetch", in_class="", source_line="",
+                           context=""),
+        ],
+        handler_sites=[
+            ExceptionHandler(file="a.py", line=20, exception_type="KeyError",
+                             in_function="main", in_class="",
+                             handler_body_summary="return", source_line="",
+                             re_raises=False, returns_value=True,
+                             assigns_default=False),
+        ],
+    )
+    assert crossing.collapse_ratio == pytest.approx(1.0)
+    assert crossing.information_loss == pytest.approx(1.0)
+
+
+def test_collapse_ratio_full_preservation():
+    """Handler that re-raises = no collapse (ratio 0.0)."""
+    crossing = SemanticCrossing(
+        exception_type="KeyError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="KeyError",
+                           in_function="lookup", in_class="", source_line="",
+                           context=""),
+            ExceptionRaise(file="a.py", line=10, exception_type="KeyError",
+                           in_function="fetch", in_class="", source_line="",
+                           context=""),
+        ],
+        handler_sites=[
+            ExceptionHandler(file="a.py", line=20, exception_type="KeyError",
+                             in_function="main", in_class="",
+                             handler_body_summary="re-raise", source_line="",
+                             re_raises=True, returns_value=False,
+                             assigns_default=False),
+        ],
+    )
+    assert crossing.collapse_ratio == pytest.approx(0.0)
+    assert crossing.information_loss == pytest.approx(0.0)
+
+
+def test_collapse_ratio_partial_preservation():
+    """Mix of re-raise and return handlers = partial collapse."""
+    crossing = SemanticCrossing(
+        exception_type="KeyError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="KeyError",
+                           in_function="lookup", in_class="", source_line="",
+                           context=""),
+            ExceptionRaise(file="a.py", line=10, exception_type="KeyError",
+                           in_function="fetch", in_class="", source_line="",
+                           context=""),
+        ],
+        handler_sites=[
+            ExceptionHandler(file="a.py", line=20, exception_type="KeyError",
+                             in_function="main", in_class="",
+                             handler_body_summary="re-raise", source_line="",
+                             re_raises=True, returns_value=False,
+                             assigns_default=False),
+            ExceptionHandler(file="a.py", line=30, exception_type="KeyError",
+                             in_function="other", in_class="",
+                             handler_body_summary="return", source_line="",
+                             re_raises=False, returns_value=True,
+                             assigns_default=False),
+        ],
+    )
+    # avg capacity = (1.0 + 0.0) / 2 = 0.5
+    # discrimination = 0.5 * 1.0 = 0.5 bits
+    # loss = 1.0 - 0.5 = 0.5 bits
+    # ratio = 0.5
+    assert crossing.collapse_ratio == pytest.approx(0.5)
+
+
+def test_report_total_information_loss():
+    """Report aggregates information loss across crossings."""
+    from semantic_scan import SemanticScanReport
+    report = SemanticScanReport(root="/test")
+    c1 = SemanticCrossing(
+        exception_type="KeyError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="KeyError",
+                           in_function="a", in_class="", source_line="", context=""),
+            ExceptionRaise(file="a.py", line=2, exception_type="KeyError",
+                           in_function="b", in_class="", source_line="", context=""),
+        ],
+        handler_sites=[
+            ExceptionHandler(file="a.py", line=10, exception_type="KeyError",
+                             in_function="main", in_class="",
+                             handler_body_summary="return", source_line="",
+                             re_raises=False, returns_value=True,
+                             assigns_default=False),
+        ],
+    )
+    c2 = SemanticCrossing(
+        exception_type="ValueError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=20, exception_type="ValueError",
+                           in_function="c", in_class="", source_line="", context=""),
+            ExceptionRaise(file="a.py", line=21, exception_type="ValueError",
+                           in_function="d", in_class="", source_line="", context=""),
+            ExceptionRaise(file="a.py", line=22, exception_type="ValueError",
+                           in_function="e", in_class="", source_line="", context=""),
+            ExceptionRaise(file="a.py", line=23, exception_type="ValueError",
+                           in_function="f", in_class="", source_line="", context=""),
+        ],
+        handler_sites=[
+            ExceptionHandler(file="a.py", line=30, exception_type="ValueError",
+                             in_function="run", in_class="",
+                             handler_body_summary="return", source_line="",
+                             re_raises=False, returns_value=True,
+                             assigns_default=False),
+        ],
+    )
+    report.crossings = [c1, c2]
+    # c1: 1 bit loss, c2: 2 bits loss = 3 total
+    assert report.total_information_loss == pytest.approx(3.0)
+    # both have ratio 1.0, mean = 1.0
+    assert report.mean_collapse_ratio == pytest.approx(1.0)
+
+
+def test_json_includes_information_theory():
+    """JSON output includes information_theory section."""
+    import json
+    from semantic_scan import SemanticScanReport
+    report = SemanticScanReport(root="/test")
+    report.crossings = [SemanticCrossing(
+        exception_type="KeyError",
+        raise_sites=[
+            ExceptionRaise(file="a.py", line=1, exception_type="KeyError",
+                           in_function="a", in_class="", source_line="", context=""),
+            ExceptionRaise(file="a.py", line=2, exception_type="KeyError",
+                           in_function="b", in_class="", source_line="", context=""),
+        ],
+        handler_sites=[],
+    )]
+    data = json.loads(report.to_json())
+    assert "information_theory" in data["crossings"][0]
+    info = data["crossings"][0]["information_theory"]
+    assert info["semantic_entropy_bits"] == 1.0
+    assert info["collapse_ratio"] == 0.0  # no handlers = no collapse
+    assert "total_information_loss_bits" in data["summary"]
