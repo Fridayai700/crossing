@@ -13,6 +13,10 @@ Scanned on 2026-02-22 using Crossing v0.9 semantic scanner.
 | rich | 100 | 58 | 74 | 5 | 5 | 1 |
 | celery | 161 | 292 | 554 | 12 | 12 | 3 |
 | astroid | 96 | 329 | 295 | 5 | 5 | 0 |
+| **sqlalchemy** | **661** | **1503** | **630** | **103** | **87** | **16** |
+| pydantic | 402 | 712 | 350 | 119 | 56 | 12 |
+| aiohttp | 166 | 451 | 223 | 53 | 40 | 11 |
+| click | 62 | 108 | 89 | 14 | 14 | 5 |
 
 ## Key Findings
 
@@ -33,6 +37,18 @@ Cleanest codebase. 47 files, 30 raises, 22 handlers, no polymorphic exception re
 
 ### httpx (3 crossings, 0 high-risk)
 Relatively clean. All medium risk. Well-structured exception handling compared to peers.
+
+### SQLAlchemy (103 crossings, 16 high-risk)
+Largest codebase in the set. 661 files, 1503 raise sites. The raise-to-handler ratio is inverted from celery (2.4:1 — far more raises than handlers), meaning exceptions are thrown abundantly but caught selectively. `RuntimeError` alone has 7 raise sites funneling into 1 handler. The 79.8-bit total info loss is the highest measured. ORM layer is the densest crossing zone.
+
+### Pydantic (119 crossings, 12 high-risk)
+Highest absolute crossing count. `ValueError` dominates: 101 raise sites, 59 handlers. The validation layer generates exceptions prolifically, and the handler tree is deep. Density: 0.30 crossings/file — moderate, but the raw count matters for a validation library where exception semantics carry user-facing meaning.
+
+### aiohttp (53 crossings, 11 high-risk)
+Async web framework. `RuntimeError` has 68 raise sites with only 3 handlers. The request/response lifecycle creates natural semantic boundaries where the same exception type means different things (connection error vs protocol error vs application error).
+
+### Click (14 crossings, 5 high-risk)
+CLI framework. `TypeError` has 26 raise sites (parameter type mismatches, decorator validation, type conversion) funneled into 2 handlers. Dense for its size (62 files). `OSError` has 12 raise sites across file operations and editor launching.
 
 ## What This Shows
 
