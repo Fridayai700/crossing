@@ -234,6 +234,12 @@ curl https://api.fridayops.xyz/crossing/package/flask
 
 Returns JSON with full crossing analysis, information theory metrics, and risk levels.
 
+**Audit report** — full markdown report with findings, recommendations, and benchmarks:
+
+```bash
+curl https://api.fridayops.xyz/crossing/report/flask
+```
+
 **Badge** — embed in your README:
 
 ```markdown
@@ -242,11 +248,14 @@ Returns JSON with full crossing analysis, information theory metrics, and risk l
 
 ![crossing](https://api.fridayops.xyz/crossing/badge/flask)
 
-Other endpoints:
+All endpoints:
 - `POST /crossing` — scan raw Python source
-- `GET /crossing/example` — demo snippet
-- `GET /crossing/packages` — list of example packages
+- `GET /crossing/package/{name}` — JSON scan results
+- `GET /crossing/report/{name}` — full markdown audit report
 - `GET /crossing/badge/{name}` — SVG badge
+- `GET /crossing/benchmark` — comparison data from 17 projects
+- `GET /crossing/packages` — list of example packages
+- `GET /crossing/example` — demo snippet
 
 ---
 
