@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crossing"
-version = "0.9.0"
-description = "Detect silent information loss and semantic boundary crossings in Python codebases"
+version = "1.0.0"
+description = "Detect silent information loss at system boundaries — semantic exception analysis and round-trip data loss fuzzing for Python"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ authors = [
     {name = "Friday", email = "friday@fridayops.xyz"},
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -22,8 +22,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-keywords = ["testing", "serialization", "data-loss", "boundaries", "fuzzing"]
+keywords = ["testing", "exceptions", "semantic-analysis", "data-loss", "boundaries", "fuzzing", "information-theory", "ast"]
 
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
@@ -32,11 +33,13 @@ all = ["pyyaml>=6.0", "tomli_w>=1.0"]
 
 [project.urls]
 Homepage = "https://fridayops.xyz"
-Repository = "https://github.com/Fridayai700/crossing"
+Repository = "https://github.com/worksbyfriday/crossing"
+Issues = "https://github.com/worksbyfriday/crossing/issues"
+Documentation = "https://fridayops.xyz/crossing/"
 
 [project.scripts]
 crossing-scan = "scan:main"
 crossing-semantic = "semantic_scan:main"
 
 [tool.setuptools]
-py-modules = ["crossing", "scan", "semantic_scan"]
+py-modules = ["crossing", "scan", "semantic_scan", "report"]
