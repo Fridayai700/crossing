@@ -1265,14 +1265,18 @@ def main():
     parser.add_argument("path", help="Directory to scan")
     parser.add_argument("--implicit", action="store_true",
                         help="Also detect implicit raises (dict access → KeyError, etc.)")
-    parser.add_argument("--format", choices=["text", "json", "markdown"],
-                        default="text", help="Output format (default: text)")
+    parser.add_argument("--format", choices=["text", "json", "markdown", "report"],
+                        default="text", help="Output format (default: text). 'report' generates full audit report.")
     parser.add_argument("--min-risk", choices=["low", "medium", "elevated", "high"],
                         default="low", help="Minimum risk level to report (default: low)")
     parser.add_argument("--exclude", action="append", default=[],
                         help="Glob patterns to exclude (can repeat)")
     parser.add_argument("--ci", action="store_true",
                         help="CI mode: exit code 1 if any elevated/high risk crossings found")
+    parser.add_argument("--name", default="",
+                        help="Project name (for --format report)")
+    parser.add_argument("--repo", default="",
+                        help="Repository identifier e.g. org/project (for --format report)")
 
     args = parser.parse_args()
 
@@ -1302,6 +1306,12 @@ def main():
         print(report.to_json())
     elif args.format == "markdown":
         print(report.to_markdown())
+    elif args.format == "report":
+        import json as json_mod
+        from report import generate_report
+        scan_data = json_mod.loads(report.to_json())
+        project_name = args.name or os.path.basename(os.path.normpath(args.path))
+        print(generate_report(scan_data, project_name=project_name, repo=args.repo))
     else:
         report.print()
 
