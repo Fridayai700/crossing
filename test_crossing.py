@@ -319,9 +319,6 @@ def test_diff_report_counts():
     assert report.equivalent_count + report.divergent_count == report.total_samples
 
 
-if __name__ == "__main__":
-    import sys
-    passed = 0
 def test_scaling_idempotent_crossing():
     """Homogeneous composition of idempotent crossings should have exponent near 0."""
     sr = scaling(json_crossing("JSON"), max_n=4, samples=100, seed=42)
@@ -338,20 +335,6 @@ def test_scaling_idempotent_no_exponent():
     # When all loss rates are identical, there's no variation to fit
     # so exponent should be None (can't determine scaling from flat data)
     assert sr.exponent is None, f"Expected None for flat data, got {sr.exponent}"
-
-
-    failed = 0
-    for name, func in sorted(globals().items()):
-        if name.startswith("test_") and callable(func):
-            try:
-                func()
-                print(f"  PASS {name}")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL {name}: {e}")
-                failed += 1
-    print(f"\n{passed} passed, {failed} failed")
-    sys.exit(1 if failed else 0)
 
 
 # --- CLI tests ---
