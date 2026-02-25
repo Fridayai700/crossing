@@ -3,7 +3,7 @@
 import pytest
 from crossing import (
     Crossing, CrossingReport, Loss, cross, _compare, compose, diff,
-    DiffReport, scaling, ScalingReport,
+    DiffReport, scaling, ScalingReport, cli, BUILTIN_CROSSINGS,
     json_crossing, json_crossing_strict, pickle_crossing,
     string_truncation_crossing,
 )
@@ -352,3 +352,35 @@ def test_scaling_idempotent_no_exponent():
                 failed += 1
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+# --- CLI tests ---
+
+def test_cli_list(capsys):
+    """CLI list command prints all available crossings."""
+    cli(["list"])
+    out = capsys.readouterr().out
+    for name in BUILTIN_CROSSINGS:
+        assert name in out
+
+
+def test_cli_test_single(capsys):
+    """CLI test command with single format produces a report."""
+    cli(["test", "json", "-n", "10", "--seed", "1"])
+    out = capsys.readouterr().out
+    assert "JSON round-trip" in out
+    assert "Samples tested:" in out
+
+
+def test_cli_compose(capsys):
+    """CLI compose command chains crossings."""
+    cli(["compose", "json", "pickle", "-n", "10", "--seed", "1"])
+    out = capsys.readouterr().out
+    assert "→" in out  # composed name uses arrow
+
+
+def test_cli_unknown_format(capsys):
+    """CLI handles unknown format gracefully."""
+    cli(["test", "nonexistent"])
+    out = capsys.readouterr().out
+    assert "Unknown crossing" in out

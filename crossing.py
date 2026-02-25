@@ -942,44 +942,88 @@ def scaling(
     )
 
 
-if __name__ == "__main__":
-    print("crossing — detect silent information loss at system boundaries\n")
+BUILTIN_CROSSINGS = {
+    "json": json_crossing,
+    "json-strict": json_crossing_strict,
+    "pickle": pickle_crossing,
+    "url": url_query_crossing,
+    "str": str_crossing,
+    "yaml": yaml_crossing,
+    "toml": toml_crossing,
+    "csv": csv_crossing,
+    "env": env_file_crossing,
+}
 
-    crossings_to_test = [
-        (json_crossing(), 500),
-        (json_crossing_strict(), 500),
-        (pickle_crossing(), 500),
-        (url_query_crossing(), 200),
-        (string_truncation_crossing(255), 500),
-        (yaml_crossing(), 500),
-        (csv_crossing(), 200),
-        (env_file_crossing(), 200),
-    ]
 
-    for c, n in crossings_to_test:
-        report = cross(c, samples=n, seed=42)
+def cli(args: list[str] | None = None) -> None:
+    """Command-line interface for crossing."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="crossing",
+        description="Detect silent information loss at system boundaries",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # crossing test [FORMAT ...] --samples N --seed S
+    test_p = sub.add_parser("test", help="Test one or more built-in crossings")
+    test_p.add_argument(
+        "formats", nargs="*", default=None,
+        help=f"Formats to test (default: all). Choices: {', '.join(BUILTIN_CROSSINGS)}",
+    )
+    test_p.add_argument("-n", "--samples", type=int, default=500, help="Samples per crossing (default: 500)")
+    test_p.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+
+    # crossing compose FORMAT FORMAT ... --samples N
+    comp_p = sub.add_parser("compose", help="Test a composed pipeline of crossings")
+    comp_p.add_argument("formats", nargs="+", choices=list(BUILTIN_CROSSINGS),
+                        help="Formats to compose in order")
+    comp_p.add_argument("-n", "--samples", type=int, default=500)
+    comp_p.add_argument("--seed", type=int, default=42)
+
+    # crossing scale FORMAT --max-n N --samples N
+    scale_p = sub.add_parser("scale", help="Measure how loss scales with boundary count")
+    scale_p.add_argument("format", choices=list(BUILTIN_CROSSINGS))
+    scale_p.add_argument("--max-n", type=int, default=8, help="Max composition depth (default: 8)")
+    scale_p.add_argument("-n", "--samples", type=int, default=200)
+    scale_p.add_argument("--seed", type=int, default=42)
+
+    # crossing list
+    sub.add_parser("list", help="List available built-in crossings")
+
+    parsed = parser.parse_args(args)
+
+    if parsed.command == "test":
+        formats = parsed.formats or list(BUILTIN_CROSSINGS)
+        for fmt in formats:
+            if fmt not in BUILTIN_CROSSINGS:
+                print(f"Unknown crossing: {fmt}. Use 'crossing list' to see available crossings.")
+                return
+            factory = BUILTIN_CROSSINGS[fmt]
+            c = factory()
+            report = cross(c, samples=parsed.samples, seed=parsed.seed)
+            report.print()
+
+    elif parsed.command == "compose":
+        crossings = [BUILTIN_CROSSINGS[f]() for f in parsed.formats]
+        pipeline = compose(*crossings)
+        report = cross(pipeline, samples=parsed.samples, seed=parsed.seed)
         report.print()
 
-    # Composed pipelines
-    print("\n--- Composed Pipelines ---\n")
+    elif parsed.command == "scale":
+        c = BUILTIN_CROSSINGS[parsed.format]()
+        sr = scaling(c, max_n=parsed.max_n, samples=parsed.samples, seed=parsed.seed)
+        sr.print()
 
-    # JSON → truncation (API → DB varchar)
-    pipeline = compose(
-        json_crossing("JSON serialize"),
-        string_truncation_crossing(100, "DB varchar(100)"),
-    )
-    report = cross(pipeline, samples=500, seed=42)
-    report.print()
+    elif parsed.command == "list":
+        print("Available crossings:")
+        for name, factory in BUILTIN_CROSSINGS.items():
+            c = factory()
+            print(f"  {name:15s} {c.name}")
 
-    # YAML → JSON (config file → API payload)
-    pipeline = compose(
-        yaml_crossing("YAML config"),
-        json_crossing("JSON API"),
-    )
-    report = cross(pipeline, samples=200, seed=42)
-    report.print()
+    else:
+        parser.print_help()
 
-    # Scaling analysis: how does loss grow with boundary count?
-    print("\n--- Scaling Analysis ---\n")
-    sr = scaling(json_crossing("JSON"), max_n=6, samples=300, seed=42)
-    sr.print()
+
+if __name__ == "__main__":
+    cli()
