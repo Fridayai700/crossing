@@ -210,6 +210,55 @@ sr = scaling(json_crossing(), max_n=5, samples=200)
 # Non-idempotent crossings show positive scaling exponents
 ```
 
+### Triangulation
+
+Compare 3+ formats simultaneously to distinguish inherent data limitations from format-specific losses:
+
+```python
+from crossing import triangulate, json_crossing, csv_crossing, env_file_crossing
+
+report = triangulate(
+    json_crossing(), csv_crossing(), env_file_crossing(),
+    samples=200, seed=42,
+)
+report.print()
+# Shared losses: inherent to the data (all formats lose it)
+# Unique losses: format-specific (only one format loses it)
+```
+
+CLI: `crossing triangulate json csv env`
+
+### Complexity Profiling
+
+Measure how loss rate varies with input complexity:
+
+```python
+from crossing import profile, json_crossing
+
+report = profile(json_crossing(), max_depth=6, samples=200, seed=42)
+report.print()
+# JSON: type diversity drives loss, not nesting depth
+# Pickle: 0% loss at all depths
+# CSV: lossy even on scalars (63%+)
+```
+
+CLI: `crossing profile json`
+
+### Full Report
+
+Comprehensive analysis combining test, complexity profile, and scaling in one call:
+
+```python
+from crossing import full_report, json_crossing
+
+fr = full_report(json_crossing(), samples=200, seed=42)
+fr.print()
+# Outputs: round-trip test, complexity profile,
+# scaling analysis, idempotency check, and verdict
+```
+
+CLI: `crossing report json`
+
 ### Codebase Scanning
 
 ```bash
