@@ -1369,6 +1369,11 @@ def cli(args: list[str] | None = None) -> None:
     rep_p.add_argument("-n", "--samples", type=int, default=200)
     rep_p.add_argument("--seed", type=int, default=42)
 
+    # crossing landscape --samples N
+    land_p = sub.add_parser("landscape", help="Compare all formats side by side, sorted by safety")
+    land_p.add_argument("-n", "--samples", type=int, default=500, help="Samples per crossing (default: 500)")
+    land_p.add_argument("--seed", type=int, default=42)
+
     # crossing list
     sub.add_parser("list", help="List available built-in crossings")
 
@@ -1411,6 +1416,51 @@ def cli(args: list[str] | None = None) -> None:
         c = BUILTIN_CROSSINGS[parsed.format]()
         fr = full_report(c, samples=parsed.samples, seed=parsed.seed)
         fr.print()
+
+    elif parsed.command == "landscape":
+        print(f"\n{'='*70}")
+        print(f"Format Safety Landscape ({parsed.samples} samples each)")
+        print(f"{'='*70}")
+        print(f"{'Format':<15} {'Silent Loss':>12} {'Crashes':>10} {'Clean':>10} {'Safety'}")
+        print(f"{'-'*15} {'-'*12} {'-'*10} {'-'*10} {'-'*12}")
+
+        rows = []
+        for name, factory in BUILTIN_CROSSINGS.items():
+            try:
+                c = factory()
+                report = cross(c, samples=parsed.samples, seed=parsed.seed)
+                n = report.total_samples
+                loss_pct = report.lossy_count / n * 100 if n else 0
+                err_pct = report.error_count / n * 100 if n else 0
+                clean_pct = report.clean_count / n * 100 if n else 0
+                rows.append((name, loss_pct, err_pct, clean_pct))
+            except (ImportError, ModuleNotFoundError):
+                pass
+
+        # Sort by silent loss rate (ascending = safest first)
+        rows.sort(key=lambda r: r[1])
+
+        for name, loss_pct, err_pct, clean_pct in rows:
+            # Safety rating based on silent loss
+            if loss_pct == 0:
+                safety = "██████████"
+            elif loss_pct < 10:
+                safety = "████████░░"
+            elif loss_pct < 30:
+                safety = "██████░░░░"
+            elif loss_pct < 50:
+                safety = "████░░░░░░"
+            elif loss_pct < 70:
+                safety = "██░░░░░░░░"
+            else:
+                safety = "░░░░░░░░░░"
+            print(f"{name:<15} {loss_pct:>10.0f}%  {err_pct:>8.0f}%  {clean_pct:>8.0f}%  {safety}")
+
+        print(f"\n{'='*70}")
+        print("Sorted by silent loss rate (lowest = safest).")
+        print("Silent loss is data that passes through without error but changes.")
+        print("Crashes are explicit failures. Clean means round-trip preserved data.")
+        print(f"{'='*70}")
 
     elif parsed.command == "list":
         print("Available crossings:")
